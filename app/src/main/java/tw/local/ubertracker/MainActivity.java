@@ -56,6 +56,8 @@ public final class MainActivity extends Activity {
     private LinearLayout historyBox;
     private long historyRevision = -1L;
     private boolean resumed = false;
+    private static boolean screenVisible;
+    static boolean isScreenVisible() { return screenVisible; }
     private boolean watching = false, active = false;
     private long startedAt = 0L;
     private String activeSource = "UBER", lastObserved = "";
@@ -93,12 +95,14 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        screenVisible = true;
         handler.removeCallbacks(tick);
         handler.post(tick);
     }
 
     @Override protected void onPause() {
         resumed = false;
+        screenVisible = false;
         handler.removeCallbacks(tick);
         super.onPause();
     }
@@ -285,7 +289,7 @@ public final class MainActivity extends Activity {
         add(observe, statusTextView, 10);
         debugView = txt("開始後可切換司機端；下拉通知欄可查看監測狀態或停止。", 12, MUTED, false);
         add(observe, debugView, 4);
-        add(observe, txt("開始監測後可切到司機端，不必停留本畫面。請允許通知及背景執行；勿強制停止本 App。分享頁載入失敗時會重試，不會誤判送達。", 12, Color.rgb(158, 106, 29), false), 10);
+        add(observe, txt("開始監測後可切到司機端，不必停留本畫面。請允許通知及背景執行；背景完成的訂單不擷取定位，地址可手動補上。勿強制停止本 App。分享頁載入失敗時會重試，不會誤判送達。", 12, Color.rgb(158, 106, 29), false), 10);
         Button browser = btn("瀏覽器檢查分享頁", MUTED);
         browser.setOnClickListener(v -> {
             String value = urlInput.getText().toString().trim();

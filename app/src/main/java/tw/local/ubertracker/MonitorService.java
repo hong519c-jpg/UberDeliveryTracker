@@ -46,7 +46,7 @@ public final class MonitorService extends Service {
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback networkCallback;
     private String url = "", message = "正在啟動背景監測…";
-    private boolean running, loaded, loading, failed, polling, locationForeground;
+    private boolean running, loaded, loading, failed, polling;
     private long loadAt, reloadAt, nextRetry, notifiedAt;
     private int errors, generation;
 
@@ -73,12 +73,8 @@ public final class MonitorService extends Service {
         String action = intent == null ? START : intent.getAction();
         if (STOP.equals(action)) { stopMonitoring(); return START_NOT_STICKY; }
         if (intent == null && !settings.getBoolean("watching", false)) { stopSelf(); return START_NOT_STICKY; }
-        boolean visible = intent != null && intent.getBooleanExtra("activity_visible", false);
-        // The location type is only added while our Activity is visible and permission is granted.
-        if (visible && hasLocationPermission()) locationForeground = true;
         try { promote(); }
         catch (SecurityException ex) {
-            locationForeground = false;
             try { promote(); } catch (Exception unavailable) {
                 settings.edit().putBoolean("watching", false).putString("monitor_message", "背景服務權限不足，請回到 App 重新開始。").apply();
                 stopSelf(); return START_NOT_STICKY;
@@ -106,13 +102,8 @@ public final class MonitorService extends Service {
 
     private void promote() {
         Notification notice = notification();
-        if (Build.VERSION.SDK_INT >= 34) {
-            int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
-            if (locationForeground) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
-            startForeground(NOTICE, notice, types);
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTICE, notice, locationForeground ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION : 0);
-        } else startForeground(NOTICE, notice);
+        if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        else startForeground(NOTICE, notice);
     }
 
     private Notification notification() {
@@ -257,8 +248,8 @@ public final class MonitorService extends Service {
             long id = store.save(start, end, "UBER 網頁偵測");
             settings.edit().putBoolean("active", false).remove("started_at").remove("started_elapsed").apply();
             markHistoryChanged();
-            if (locationForeground && hasLocationPermission()) AddressResolver.capture(this, store, id, this::markHistoryChanged);
-            else { store.setAddress(id, "此筆完成時無可用的定位授權，請手動補上地址"); markHistoryChanged(); }
+            if (MainActivity.isScreenVisible() && hasLocationPermission()) AddressResolver.capture(this, store, id, this::markHistoryChanged);
+            else { store.setAddress(id, "背景結算已保存時間與金額，未擷取背景定位，請手動補上地址"); markHistoryChanged(); }
         }
         notifyNow();
     }
