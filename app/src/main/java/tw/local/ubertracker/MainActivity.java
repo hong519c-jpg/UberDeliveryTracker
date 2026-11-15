@@ -11,6 +11,10 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
+import android.os.SystemClock;
+import android.provider.Settings;
+import java.util.ArrayList;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -36,7 +40,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-/** 原生測試版：App 保持在前景時，以 WebView 讀取 Uber 分享頁面文字。 */
+/** 背景監測版：由前景服務獨立監測 Uber 分享頁面文字。 */
 public final class MainActivity extends Activity {
     private static final int DARK = Color.rgb(16, 35, 50);
     private static final int GREEN = Color.rgb(8, 123, 101);
@@ -50,25 +54,54 @@ public final class MainActivity extends Activity {
     private TextView stateView, timerView, liveMoneyView, todayView, todayCountView, debugView, watcherView, statusTextView;
     private EditText urlInput;
     private LinearLayout historyBox;
-    private WebView web;
-    private boolean watching = false, webLoaded = false, active = false;
-    private long startedAt = 0L, lastReloadAt = 0L;
-    private String activeSource = "UBER", lastObserved = "", stableCandidate = "";
-    private int stableCount = 0;
-    private boolean pollingNow = false;
+    private long historyRevision = -1L;
+    private boolean resumed = false;
+    private boolean watching = false, active = false;
+    private long startedAt = 0L;
+    private String activeSource = "UBER", lastObserved = "";
     private long pendingLocationId = -1L;
+
+    static String statusScript() { return POLL_SCRIPT; }
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
-            refreshLive();
-            if (watching && webLoaded && web != null && !pollingNow) inspectPage();
-            if (watching && webLoaded && web != null && System.currentTimeMillis() - lastReloadAt > 45000L) {
-                lastReloadAt = System.currentTimeMillis();
-                web.reload();
-            }
-            handler.postDelayed(this, 2000L);
+            if (!resumed) return;
+            syncMonitorState();
+            handler.postDelayed(this, 1000L);
         }
     };
+
+    private void syncMonitorState() {
+        active = settings.getBoolean("active", false);
+        startedAt = settings.getLong("started_at", 0L);
+        activeSource = settings.getString("active_source", "UBER");
+        lastObserved = settings.getString("observed", "");
+        watching = settings.getBoolean("watching", false);
+        long heartbeat = settings.getLong("monitor_heartbeat", 0L);
+        boolean healthy = heartbeat > 0 && SystemClock.elapsedRealtime() >= heartbeat
+                && SystemClock.elapsedRealtime() - heartbeat < 20000L;
+        watcherView.setText(watching ? (healthy ? "● 背景服務執行中，可切換司機端" : "● 背景服務暫無回應，請重新開始監測") : "監測已暫停");
+        String detected = settings.getString("detected", "UNKNOWN");
+        statusTextView.setText("TRIP".equals(detected) ? "狀態文字：正在途中"
+                : "ONLINE".equals(detected) ? "狀態文字：上線中" : "狀態文字：等待確認");
+        debugView.setText(settings.getString("monitor_message", "請貼上 Uber 分享網址後按開始背景監測。"));
+        long rev = settings.getLong("history_revision", 0L);
+        if (historyRevision != rev) { historyRevision = rev; refreshHistory(); }
+        refreshLive();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        resumed = true;
+        handler.removeCallbacks(tick);
+        handler.post(tick);
+    }
+
+    @Override protected void onPause() {
+        resumed = false;
+        handler.removeCallbacks(tick);
+        super.onPause();
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -82,12 +115,9 @@ public final class MainActivity extends Activity {
         if (active && startedAt <= 0L) active = false;
         buildUi();
         acceptSharedLink(getIntent());
-        // Activity 被 Android 重新建立時，恢復上次未暫停的網頁監測。
-        if (!watching && settings.getBoolean("watching", false)
-                && !urlInput.getText().toString().trim().isEmpty()) beginWatching();
+
         refreshHistory();
         refreshLive();
-        handler.post(tick);
     }
 
     @Override public void onNewIntent(Intent intent) {
@@ -244,7 +274,7 @@ public final class MainActivity extends Activity {
         urlInput.setPadding(dp(14), dp(12), dp(14), dp(12));
         urlInput.setBackground(outlinedBackground());
         add(observe, urlInput, 17);
-        Button begin = btn("開始監測", GREEN);
+        Button begin = btn("開始背景監測", GREEN);
         Button stop = btn("暫停監測", DARK);
         begin.setOnClickListener(v -> beginWatching());
         stop.setOnClickListener(v -> stopWatching());
@@ -253,39 +283,23 @@ public final class MainActivity extends Activity {
         add(observe, watcherView, 12);
         statusTextView = txt("狀態文字：等待讀取", 20, DARK, true);
         add(observe, statusTextView, 10);
-        debugView = txt("請從 Uber App 分享行程連結到本 App；首次測試須確認網頁正常載入。", 12, MUTED, false);
+        debugView = txt("開始後可切換司機端；下拉通知欄可查看監測狀態或停止。", 12, MUTED, false);
         add(observe, debugView, 4);
-        add(observe, txt("注意：收到連結不等於已接單。只有確實偵測到『正在途中』才開始計時。須保持 App 前景且螢幕開啟；Uber 可能限制內嵌讀取。", 12, Color.rgb(158, 106, 29), false), 10);
-        web = new WebView(this);
-        WebSettings w = web.getSettings();
-        w.setJavaScriptEnabled(true);
-        w.setDomStorageEnabled(true);
-        w.setLoadsImagesAutomatically(true);
-        w.setSupportMultipleWindows(false);
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
-        web.setWebViewClient(new WebViewClient() {
-            @Override public void onPageFinished(WebView view, String url) {
-                webLoaded = true;
-                lastReloadAt = System.currentTimeMillis();
-                debugView.setText("頁面已載入；正在尋找『上線中／正在途中』文字…");
-            }
-            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    webLoaded = false;
-                    debugView.setText("Uber 頁面無法載入：可能連結失效、網路異常或 Uber 限制內嵌瀏覽器。");
-                }
-            }
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (isUberUrl(uri)) return false;
-                try { startActivity(new Intent(Intent.ACTION_VIEW, uri)); } catch (Exception ignored) { }
-                return true;
+        add(observe, txt("開始監測後可切到司機端，不必停留本畫面。請允許通知及背景執行；勿強制停止本 App。分享頁載入失敗時會重試，不會誤判送達。", 12, Color.rgb(158, 106, 29), false), 10);
+        Button browser = btn("瀏覽器檢查分享頁", MUTED);
+        browser.setOnClickListener(v -> {
+            String value = urlInput.getText().toString().trim();
+            if (isUberUrl(Uri.parse(value))) {
+                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(value))); }
+                catch (Exception e) { toast("無法開啟瀏覽器"); }
             }
         });
-        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(295));
-        wp.topMargin = dp(14);
-        observe.addView(web, wp);
+        Button background = btn("背景執行設定", MUTED);
+        background.setOnClickListener(v -> {
+            try { startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))); }
+            catch (Exception e) { toast("請到手機設定允許本 App 背景執行"); }
+        });
+        addButtons(observe, browser, background);
         add(root, observe, 14);
 
         LinearLayout recent = card();
@@ -325,96 +339,47 @@ public final class MainActivity extends Activity {
 
     private void beginWatching() {
         String url = urlInput.getText().toString().trim();
-        Uri uri;
-        try { uri = Uri.parse(url); } catch (Exception e) { toast("網址格式不正確"); return; }
-        if (!isUberUrl(uri)) { toast("請使用 trip.uber.com 或 m.uber.com 的 HTTPS 分享網址"); return; }
-        settings.edit().putString("url", url).putBoolean("watching", true).apply();
-        watching = true;
-        webLoaded = false;
-        pollingNow = false;
-        stableCandidate = "";
-        stableCount = 0;
-        lastObserved = "";
-        lastReloadAt = System.currentTimeMillis();
-        web.loadUrl(url);
-        watcherView.setText("● 正在監測（需保持畫面開啟）");
-        statusTextView.setText("狀態文字：等待讀取");
-        debugView.setText("正在載入 Uber 分享頁面…");
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        ensureLocationPermission();
+        if (!isUberUrl(Uri.parse(url))) { toast("請使用有效的 HTTPS Uber 分享網址"); return; }
+        try {
+            Intent intent = new Intent(this, MonitorService.class).setAction(MonitorService.START)
+                    .putExtra("url", url).putExtra("activity_visible", true);
+            startForegroundService(intent);
+            ensureLocationPermission();
+            debugView.setText("正在啟動背景服務，可從通知欄查看狀態…");
+        } catch (Exception e) { toast("背景服務無法啟動，請允許背景執行後重試"); }
     }
 
     private void stopWatching() {
-        watching = false;
         settings.edit().putBoolean("watching", false).apply();
-        webLoaded = false;
-        watcherView.setText("監測已暫停");
-        debugView.setText(active ? "計時仍在繼續；可按『結束配送』手動結算。" : "尚未監測；可再按開始監測。");
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-    }
-
-    private void inspectPage() {
-        pollingNow = true;
-        try {
-            web.evaluateJavascript(POLL_SCRIPT, result -> {
-                pollingNow = false;
-                if (!watching) return;
-                String value = result == null ? "UNKNOWN" : result.replace("\"", "").trim();
-                statusTextView.setText("ONLINE".equals(value) ? "狀態文字：上線中"
-                        : "TRIP".equals(value) ? "狀態文字：正在途中" : "狀態文字：暫時無法確認");
-                if ("ONLINE".equals(value) || "TRIP".equals(value)) {
-                    if (stableCandidate.equals(value)) stableCount++;
-                    else { stableCandidate = value; stableCount = 1; }
-                    if (stableCount >= 2 && !lastObserved.equals(value)) {
-                        lastObserved = value;
-                        processStatus(value);
-                    }
-                } else {
-                    stableCandidate = "";
-                    stableCount = 0;
-                    debugView.setText("AMBIGUOUS".equals(value)
-                            ? "同一頁面同時出現『上線中／正在途中』，狀態不明；本次不變更計時。"
-                            : "找不到指定狀態文字。WebView 可能尚未載入，或 Uber 已更改頁面。計時不會因此自動結束。");
-                }
-            });
-        } catch (Exception e) {
-            pollingNow = false;
-            debugView.setText("網頁文字讀取失敗，請使用模擬測試。");
-        }
-    }
-
-    private void processStatus(String status) {
-        if ("TRIP".equals(status)) {
-            debugView.setText("已連續偵測到『正在途中』，時間：" + when.format(new Date()));
-            if (!active) startDelivery("UBER 網頁偵測");
-        } else {
-            debugView.setText("已連續偵測到『上線中』，時間：" + when.format(new Date()));
-            if (active && "UBER 網頁偵測".equals(activeSource)) finishDelivery(false);
-        }
-        refreshLive();
+        stopService(new Intent(this, MonitorService.class));
+        syncMonitorState();
     }
 
     private void startDelivery(String source) {
+        syncMonitorState();
         if (active) { toast("已有一筆配送正在計時，請先完成配送"); return; }
         startedAt = System.currentTimeMillis();
         activeSource = source;
         active = true;
         settings.edit().putBoolean("active", true).putLong("started_at", startedAt)
-                .putString("active_source", activeSource).apply();
+                .putString("active_source", activeSource).putLong("started_elapsed", SystemClock.elapsedRealtime()).apply();
         ensureLocationPermission();
         refreshLive();
         toast("開始計時：" + when.format(new Date(startedAt)));
     }
 
     private void finishDelivery(boolean manuallyEnded) {
+        syncMonitorState();
         if (!active) { toast("目前沒有配送在計時"); return; }
         // 先把時間固定，再查 GPS；定位所花時間不計入配送。
-        long endedAt = System.currentTimeMillis();
+        long startedElapsed = settings.getLong("started_elapsed", -1L);
+        long endedAt = startedElapsed >= 0L && SystemClock.elapsedRealtime() >= startedElapsed
+                ? startedAt + SystemClock.elapsedRealtime() - startedElapsed : System.currentTimeMillis();
         String source = activeSource + (manuallyEnded ? "／手動完成" : "");
         long id = store.save(startedAt, endedAt, source);
         active = false;
         startedAt = 0L;
-        settings.edit().putBoolean("active", false).remove("started_at").apply();
+        settings.edit().putBoolean("active", false).remove("started_at").remove("started_elapsed").apply();
         refreshLive();
         refreshHistory();
         captureEndLocation(id);
@@ -443,6 +408,9 @@ public final class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
+        if (requestCode == 101 && settings.getBoolean("watching", false) && resumed) {
+            try { startService(new Intent(this, MonitorService.class).setAction(MonitorService.UPDATE_LOCATION).putExtra("activity_visible", true)); } catch (Exception ignored) { }
+        }
         if (requestCode == 101 && pendingLocationId >= 0L) {
             long id = pendingLocationId;
             pendingLocationId = -1L;
@@ -451,16 +419,23 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureLocationPermission() {
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
-            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, 101);
+        ArrayList<String> permissions = new ArrayList<>();
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS);
+        if (!permissions.isEmpty()) requestPermissions(permissions.toArray(new String[0]), 101);
     }
 
     private void refreshLive() {
         if (timerView == null) return;
         if (active) {
-            long elapsed = Math.max(0L, System.currentTimeMillis() - startedAt);
+            long base = settings.getLong("started_elapsed", -1L);
+            long elapsed = base >= 0 && SystemClock.elapsedRealtime() >= base
+                    ? SystemClock.elapsedRealtime() - base : Math.max(0L, System.currentTimeMillis() - startedAt);
             long seconds = elapsed / 1000;
             timerView.setText(String.format(Locale.TAIWAN, "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60));
             liveMoneyView.setText(FareCalculator.money(FareCalculator.amountCents(FareCalculator.billedMinutes(elapsed))));
@@ -562,14 +537,8 @@ public final class MainActivity extends Activity {
 
     private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
 
-    @Override public void onBackPressed() {
-        if (web != null && web.canGoBack() && watching) web.goBack();
-        else super.onBackPressed();
-    }
-
     @Override public void onDestroy() {
         handler.removeCallbacks(tick);
-        if (web != null) { web.stopLoading(); web.destroy(); web = null; }
         if (store != null) store.close();
         super.onDestroy();
     }
