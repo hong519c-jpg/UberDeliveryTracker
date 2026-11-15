@@ -26,14 +26,32 @@ jobs:
       - name: Test billing policy (pure Java)
         run: |
           mkdir -p /tmp/tracker-check
-          javac -encoding UTF-8 -d /tmp/tracker-check app/src/main/java/tw/local/ubertracker/FareCalculator.java app/src/main/java/tw/local/ubertracker/UberShareLink.java tests/FareCalculatorTest.java tests/UberShareLinkTest.java
+          javac -encoding UTF-8 -d /tmp/tracker-check app/src/main/java/tw/local/ubertracker/FareCalculator.java app/src/main/java/tw/local/ubertracker/UberShareLink.java tests/FareCalculatorTest.java tests/UberShareLinkTest.java app/src/main/java/tw/local/ubertracker/StatusGate.java tests/StatusGateTest.java
           java -cp /tmp/tracker-check FareCalculatorTest
           java -cp /tmp/tracker-check UberShareLinkTest
+          java -cp /tmp/tracker-check StatusGateTest
       - name: Test status text detection
         run: node tests/StatusTextDetectorTest.js
       - name: Compile debug APK
         run: gradle --no-daemon assembleDebug
+      - name: Enable emulator acceleration for this runner
+        run: sudo chown "$(id -u)" /dev/kvm
+      - name: Verify monitor without Activity on Android 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: gradle --no-daemon connectedDebugAndroidTest
       - uses: actions/upload-artifact@v4
         with:
           name: uber-tracker-test-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload device test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: background-monitor-test-reports
+          path: app/build/reports/androidTests/connected/
+          if-no-files-found: ignore
