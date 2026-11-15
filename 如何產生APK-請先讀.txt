@@ -1,0 +1,5 @@
+外送計時收入 Android v0.4 原生專案。
+此壓縮檔不是 APK，無法直接在手機安裝。
+建置：在 Android Studio 開啟本資料夾，完成 Gradle Sync，選擇 Build APK(s)。
+也可上傳到你自己建立的「外送 App 新 GitHub 儲存庫」，執行內附 GitHub Actions workflow。
+提醒：Uber 分享畫面偵測尚未在實機驗證；需要 App 置於前景。
