@@ -29,6 +29,8 @@ jobs:
           javac -encoding UTF-8 -d /tmp/tracker-check app/src/main/java/tw/local/ubertracker/FareCalculator.java app/src/main/java/tw/local/ubertracker/UberShareLink.java tests/FareCalculatorTest.java tests/UberShareLinkTest.java
           java -cp /tmp/tracker-check FareCalculatorTest
           java -cp /tmp/tracker-check UberShareLinkTest
+      - name: Test status text detection
+        run: node tests/StatusTextDetectorTest.js
       - name: Compile debug APK
         run: gradle --no-daemon assembleDebug
       - uses: actions/upload-artifact@v4
