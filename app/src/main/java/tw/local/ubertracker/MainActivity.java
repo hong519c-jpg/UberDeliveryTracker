@@ -42,12 +42,12 @@ public final class MainActivity extends Activity {
     private static final int GREEN = Color.rgb(8, 123, 101);
     private static final int MUTED = Color.rgb(90, 111, 125);
     private static final int BG = Color.rgb(244, 247, 247);
-    private static final String POLL_SCRIPT = "(function(){try{var t=((document.body&&document.body.innerText)||'').replace(/\\s+/g,'');var trip=t.indexOf('正在途中')>=0||t.indexOf('路途中')>=0;var online=t.indexOf('上線中')>=0;if(trip&&online)return 'AMBIGUOUS';if(trip)return 'TRIP';if(online)return 'ONLINE';return 'UNKNOWN';}catch(e){return 'UNKNOWN';}})()";
+    private static final String POLL_SCRIPT = "(function(){try{ function state(text){ var t=(text||'').replace(/[\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069]/g,'').trim().replace(/\\s+/g,' '); var compact=t.replace(/\\s/g,''); if(compact==='上線中')return 'ONLINE'; if(compact==='正在途中')return 'TRIP'; var m=t.match(/^(?:[\\u3400-\\u9FFFA-Za-z0-9·・._-]{1,24})\\s+(上線中|正在途中)$/); return m?(m[1]==='上線中'?'ONLINE':'TRIP'):null; } function visible(e){ if(!e||!e.getClientRects().length)return false; for(var a=e;a;a=a.parentElement){ if(/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|TEXTAREA|OPTION|SVG|CANVAS)$/.test(a.tagName))return false; if(a.hidden||a.getAttribute('aria-hidden')==='true'||a.hasAttribute('inert'))return false; var css=getComputedStyle(a); if(css.display==='none'||css.visibility==='hidden'||css.visibility==='collapse'||Number(css.opacity)===0)return false; } return true; } if(!document.body)return 'UNKNOWN'; var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),node,online=false,trip=false; while((node=walker.nextNode())){ var el=node.parentElement; if(!visible(el))continue; var value=state(node.nodeValue); /* Join split inline status text only within a compact local element. */ if(!value&&el.childElementCount<=4&&el.textContent.length<=64)value=state(el.textContent); if(value==='ONLINE')online=true; if(value==='TRIP')trip=true; } return trip&&online?'AMBIGUOUS':trip?'TRIP':online?'ONLINE':'UNKNOWN'; }catch(e){return 'UNKNOWN';}})()";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat when = new SimpleDateFormat("MM/dd HH:mm:ss", Locale.TAIWAN);
     private DeliveryStore store;
     private SharedPreferences settings;
-    private TextView stateView, timerView, liveMoneyView, todayView, todayCountView, debugView, watcherView;
+    private TextView stateView, timerView, liveMoneyView, todayView, todayCountView, debugView, watcherView, statusTextView;
     private EditText urlInput;
     private LinearLayout historyBox;
     private WebView web;
@@ -233,13 +233,13 @@ public final class MainActivity extends Activity {
 
         LinearLayout observe = card();
         add(observe, txt("⤴  Uber 分享網址", 18, DARK, true), 0);
-        add(observe, txt("收到 Uber 分享後立即啟動監測，辨識『上線中／正在途中』", 12, MUTED, false), 6);
+        add(observe, txt("僅比對狀態列的『上線中／正在途中』，忽略地圖、姓名、車牌與地址", 12, MUTED, false), 6);
         urlInput = new EditText(this);
         urlInput.setSingleLine(true);
         urlInput.setTextSize(13);
         urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         urlInput.setText(settings.getString("url", ""));
-        urlInput.setHint("https://trip.uber.com/…");
+        urlInput.setHint("貼上 Uber 分享網址（trip.uber.com 或 m.uber.com）");
         urlInput.setSelectAllOnFocus(true);
         urlInput.setPadding(dp(14), dp(12), dp(14), dp(12));
         urlInput.setBackground(outlinedBackground());
@@ -251,6 +251,8 @@ public final class MainActivity extends Activity {
         addButtons(observe, begin, stop);
         watcherView = txt("等待 Uber 分享網址", 13, GREEN, true);
         add(observe, watcherView, 12);
+        statusTextView = txt("狀態文字：等待讀取", 20, DARK, true);
+        add(observe, statusTextView, 10);
         debugView = txt("請從 Uber App 分享行程連結到本 App；首次測試須確認網頁正常載入。", 12, MUTED, false);
         add(observe, debugView, 4);
         add(observe, txt("注意：收到連結不等於已接單。只有確實偵測到『正在途中』才開始計時。須保持 App 前景且螢幕開啟；Uber 可能限制內嵌讀取。", 12, Color.rgb(158, 106, 29), false), 10);
@@ -325,7 +327,7 @@ public final class MainActivity extends Activity {
         String url = urlInput.getText().toString().trim();
         Uri uri;
         try { uri = Uri.parse(url); } catch (Exception e) { toast("網址格式不正確"); return; }
-        if (!isUberUrl(uri)) { toast("請使用 https://trip.uber.com/... 的 Uber 分享網址"); return; }
+        if (!isUberUrl(uri)) { toast("請使用 trip.uber.com 或 m.uber.com 的 HTTPS 分享網址"); return; }
         settings.edit().putString("url", url).putBoolean("watching", true).apply();
         watching = true;
         webLoaded = false;
@@ -336,6 +338,7 @@ public final class MainActivity extends Activity {
         lastReloadAt = System.currentTimeMillis();
         web.loadUrl(url);
         watcherView.setText("● 正在監測（需保持畫面開啟）");
+        statusTextView.setText("狀態文字：等待讀取");
         debugView.setText("正在載入 Uber 分享頁面…");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         ensureLocationPermission();
@@ -357,6 +360,8 @@ public final class MainActivity extends Activity {
                 pollingNow = false;
                 if (!watching) return;
                 String value = result == null ? "UNKNOWN" : result.replace("\"", "").trim();
+                statusTextView.setText("ONLINE".equals(value) ? "狀態文字：上線中"
+                        : "TRIP".equals(value) ? "狀態文字：正在途中" : "狀態文字：暫時無法確認");
                 if ("ONLINE".equals(value) || "TRIP".equals(value)) {
                     if (stableCandidate.equals(value)) stableCount++;
                     else { stableCandidate = value; stableCount = 1; }
